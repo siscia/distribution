@@ -14,6 +14,7 @@ import (
 	_ "github.com/docker/distribution/registry/storage/driver/inmemory"
 	_ "github.com/docker/distribution/registry/storage/driver/middleware/alicdn"
 	_ "github.com/docker/distribution/registry/storage/driver/middleware/cloudfront"
+	_ "github.com/docker/distribution/registry/storage/driver/middleware/cvmfs"
 	_ "github.com/docker/distribution/registry/storage/driver/middleware/redirect"
 	_ "github.com/docker/distribution/registry/storage/driver/oss"
 	_ "github.com/docker/distribution/registry/storage/driver/s3-aws"
