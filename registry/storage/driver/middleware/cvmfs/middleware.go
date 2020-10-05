@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"path/filepath"
@@ -51,7 +52,7 @@ func (s *CVMFSStorageMiddleware) periodicCleanUpBlobTypes() {
 		func() {
 			s.blobTypesMutex.Lock()
 			defer s.blobTypesMutex.Unlock()
-			if len(s.blobTypes) >= 500 { // why so many?
+			if len(s.blobTypes) >= 1000 { // why so many?
 				s.blobTypes = make(map[string]blobType)
 			}
 		}()
@@ -60,6 +61,26 @@ func (s *CVMFSStorageMiddleware) periodicCleanUpBlobTypes() {
 
 func (s *CVMFSStorageMiddleware) getHost() string {
 	return "localhost:8080"
+}
+
+func (s *CVMFSStorageMiddleware) checkLayer(digest string) int {
+	url := fmt.Sprintf("http://%s/layer/status/%s", s.getHost(), digest)
+	resp, err := http.Get(url)
+	if err != nil {
+		return 500
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+func (s *CVMFSStorageMiddleware) pushLayer(digest string, layerData io.Reader) (*http.Response, error) {
+	url := fmt.Sprintf("http://%s/layer/filesystem/%s", s.getHost(), digest)
+	return http.Post(url, "", layerData)
+}
+
+func (s *CVMFSStorageMiddleware) createFlat(name string, manifest io.Reader) (*http.Response, error) {
+	url := fmt.Sprintf("http://%s/flat/human/%s", s.getHost(), name)
+	return http.Post(url, "", manifest)
 }
 
 func (s *CVMFSStorageMiddleware) addBlobType(digest string, bT blobType) {
@@ -106,9 +127,8 @@ func (s *CVMFSStorageMiddleware) PutContent(ctx context.Context, path string, co
 		if err != nil {
 			return err
 		}
-		url := fmt.Sprintf("http://localhost:8080/flat/human/%s:%s", repository, tag)
-
-		resp, err := http.Post(url, "", bytes.NewReader(manifestBytes2))
+		name := fmt.Sprintf("%s:%s", repository, tag)
+		resp, err := s.createFlat(name, bytes.NewReader(manifestBytes2))
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
 		}
@@ -158,9 +178,12 @@ func (s *CVMFSStorageMiddleware) Move(ctx context.Context, source, dest string) 
 	}
 	fmt.Printf("\n\tFound layer: %s", layer)
 	reader, err := s.Reader(ctx, source, 0)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
 	// the url should be in the config
-	url := fmt.Sprintf("http://localhost:8080/layer/filesystem/%s", layer)
-	resp, err := http.Post(url, "", reader)
+	resp, err := s.pushLayer(layer, reader)
 	if err != nil {
 		fmt.Printf("Error: %s\n", err.Error())
 	}
@@ -194,20 +217,15 @@ func (s *CVMFSStorageMiddleware) Stat(ctx context.Context, path string) (info st
 
 	fmt.Println("trying get layer info")
 	// this should return either 200 or 404
-	url := fmt.Sprintf("http://localhost:8080/layer/status/%s", layer)
-	resp, err := http.Get(url)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 200 {
+	statusCode := s.checkLayer(layer)
+	if statusCode == 200 {
 		fmt.Println("layer exists! Good!")
 		// the layer exists
 		// very happy path
 		return
 	}
 
-	if resp.StatusCode != 404 {
+	if statusCode != 404 {
 		// it should never happen and we are not really sure what to do
 		return
 	}
@@ -227,14 +245,14 @@ func (s *CVMFSStorageMiddleware) Stat(ctx context.Context, path string) (info st
 	if err != nil {
 		return
 	}
+	defer reader.Close()
 	if blobType == layerBT {
 		fmt.Println("trying to push layer: ", path)
 		// best / low effort push
 		if err != nil {
 			return
 		}
-		url := fmt.Sprintf("http://localhost:8080/layer/filesystem/%s", layer)
-		resp, err := http.Post(url, "", reader)
+		resp, err := s.pushLayer(layer, reader)
 		if err != nil {
 			return
 		}
@@ -252,8 +270,7 @@ func (s *CVMFSStorageMiddleware) Stat(ctx context.Context, path string) (info st
 	if gzipCheck[0] == 0x1f && gzipCheck[1] == 0x8b {
 		// we found a layer!
 		// we try to push it
-		url := fmt.Sprintf("http://%s/layer/filesystem/%s", s.getHost(), layer)
-		resp, err := http.Post(url, "", reader)
+		resp, err := s.pushLayer(layer, reader)
 		if err != nil {
 			return
 		}
@@ -263,11 +280,11 @@ func (s *CVMFSStorageMiddleware) Stat(ctx context.Context, path string) (info st
 	}
 	// it is not a gzip, so it is not a layer
 	// let's try to identify it nevertheless
-	reader.Close()
 	reader, err = s.Reader(ctx, path, 0)
 	if err != nil {
 		return
 	}
+	defer reader.Close()
 
 	bytes, err := ioutil.ReadAll(reader)
 	if err != nil {
